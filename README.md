@@ -1,76 +1,110 @@
 # Context Draft Engine
 
-A system that drafts content from noisy multi-source context (commits, PRs,
-issues) and learns from human edits over successive rounds. Built as a
-demo for Manicule's Engineering Intern role.
+A system that drafts changelog entries from noisy multi-source GitHub
+activity (commits, PRs, issues) and learns from human edits over successive
+rounds. Built as a demo for Manicule's Engineering Intern role.
 
-## Status: phases 1-4 complete, phase 5 needs real edit rounds
+## The idea
 
-Ingests GitHub activity, drafts a changelog entry from it via an LLM, lets a
-human edit the draft in a browser UI, and logs each edit so future drafts for
-the same repo learn from past edits. What's left is actually running a few
-rounds of real edits so the edit-distance trend has data to show.
+Writing changelogs from raw engineering activity is repetitive, and a lot of
+what makes one good is implicit editorial judgment — what to group, what to
+skip, how terse to be. Rather than trying to encode that judgment upfront,
+this project has an LLM draft the changelog, has a human edit it, and feeds
+that edit back into the next draft as a worked example. Over a few rounds on
+the same repo, drafts should need less and less correction.
+
+## How it works
+
+```
+GitHub API → RepoContext → LLM draft → human edit (UI) → logged round
+                 ↑                                            │
+                 └──────── fed back as few-shot examples ──────┘
+```
+
+1. **Ingest** — pull recent commits, PRs, and issues for a public repo from
+   the GitHub REST API.
+2. **Draft** — send that context to an LLM (via OpenRouter) with a changelog
+   -writing prompt, get back a draft.
+3. **Review** — a human edits the draft in a browser UI.
+4. **Remember** — the (draft, edit) pair is logged. The _next_ draft for that
+   repo includes recent past edits as few-shot examples, so the model can
+   pick up on the editor's recurring preferences.
+5. **Measure** — word-level edit distance between each draft and its edited
+   version is tracked per round, so the learning effect is visible rather
+   than assumed.
 
 ## Setup
 
 ```bash
 npm install
 cp .env.example .env
-# GITHUB_TOKEN: optional, raises rate limit 60/hr -> 5000/hr
-# OPENROUTER_API_KEY: required for draft generation (phase 2+), get one at
+# GITHUB_TOKEN: optional, raises GitHub API rate limit 60/hr -> 5000/hr
+# OPENROUTER_API_KEY: required for draft generation, get one at
 #   https://openrouter.ai/keys
 ```
 
 ## Run
 
-Start the server:
-
 ```bash
 npm run dev
 ```
 
-- `GET /api/context/:owner/:repo?limit=10` — raw ingested context (phase 1)
-- `GET /api/draft/:owner/:repo?limit=10` — generates a changelog draft from
-  that context, folding in this repo's past edit rounds as few-shot examples
-  (phases 2 + 4)
-- `POST /api/edits/:owner/:repo` `{ draft, editedDraft }` — logs a human edit,
-  computes word-level edit distance, returns the logged round (phase 3)
-- `GET /api/trend/:owner/:repo` — logged rounds' edit distances, for
-  plotting (phase 5)
-- `/review.html` — UI: fetch a draft, edit it in a textarea, save the round
-- `/trend.html` — UI: line chart of edit distance per round, plus a table
+Then either use the UI or hit the API directly.
 
-Standalone scripts (no server needed):
+**UI** (http://localhost:3000):
+
+- `/review.html` — fetch a draft for a repo, edit it, save the round
+- `/trend.html` — line chart + table of edit distance per round
+
+**API**:
+
+- `GET /api/context/:owner/:repo?limit=10` — raw ingested context
+- `GET /api/draft/:owner/:repo?limit=10` — generates a changelog draft,
+  folding in that repo's past edits as few-shot examples
+- `POST /api/edits/:owner/:repo` `{ draft, editedDraft }` — logs a human
+  edit, computes edit distance, returns the logged round
+- `GET /api/trend/:owner/:repo` — logged rounds' edit distances
+
+**Standalone scripts** (no server needed):
 
 ```bash
-npm run test:ingest -- colinhacks zod   # phase 1 only
-npm run test:draft  -- colinhacks zod   # phases 1 + 2, prints the draft
+npm run test:ingest -- colinhacks zod   # ingestion only
+npm run test:draft  -- colinhacks zod   # ingestion + draft, prints the draft
 ```
 
-## Measuring the trend (phase 5)
-
-To actually see the edit-distance trend drop, run a few real rounds on the
-same repo:
-
-1. Open `/review.html`, fetch a draft for a repo, make real edits, save.
-2. Repeat 2-3 times for the *same* repo — each round's draft is generated
-   using the previous rounds' edits as few-shot examples.
-3. Open `/trend.html` for that repo to see edit distance per round.
-
-Edit history is stored per-repo in `data/edits/<owner>-<repo>.json`.
+To reproduce a trend: open `/review.html`, fetch → edit for real → save,
+repeat 2-3 times on the same repo, then check `/trend.html`. Edit history is
+stored per-repo in `data/edits/<owner>-<repo>.json`.
 
 ## Project structure
 
 ```
 src/
-  github.ts         ingestion — fetches and shapes GitHub API data (phase 1)
-  draft.ts           draft generation via OpenRouter, folds in edit memory (phases 2 + 4)
-  store.ts           persists edit rounds to data/edits/ (phases 3-5)
+  github.ts         ingestion — fetches and shapes GitHub API data
+  draft.ts           draft generation via OpenRouter, folds in edit memory
+  store.ts           persists edit rounds to data/edits/
   edit-distance.ts   word-level Levenshtein distance
-  server.ts          Express app — see endpoints above
+  server.ts          Express app exposing the API above
   test-ingest.ts     standalone ingestion test script
   test-draft.ts      standalone draft generation test script
 public/
-  review.html        draft review + edit-logging UI (phase 3)
-  trend.html         edit-distance trend chart (phase 5)
+  review.html        draft review + edit-logging UI
+  trend.html         edit-distance trend chart
+data/
+  edits/             per-repo (draft, edit, distance) history — the model's memory
 ```
+
+## Known limitations
+
+- **Draft quality**: the model (`openai/gpt-4o-mini` via OpenRouter)
+  sometimes describes open/unmerged PRs as if they'd already shipped —
+  the prompt asks it to trace every claim to the given context, but doesn't
+  yet enforce open-vs-merged distinctions. Worth tightening before trusting
+  drafts unreviewed.
+- **One repo's worth of evidence**: the trend above is from a single 3-round
+  run on one repo. A flat edit distance after round 1 is a good sign but
+  could also mean the round-2 edit was just smaller to begin with — more
+  rounds and more repos would make the trend more convincing.
+- **No automated tests** — correctness has been verified by manual runs
+  (`npm run test:ingest`, `npm run test:draft`, the UI flows) rather than a
+  test suite.
