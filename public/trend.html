@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Context Draft Engine — Trend</title>
+<style>
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+  nav a { margin-right: 1rem; }
+  .row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+  input { padding: 0.4rem; font-family: monospace; width: 140px; }
+  button { padding: 0.4rem 0.9rem; cursor: pointer; }
+  .status { color: var(--text-secondary); font-size: 0.9rem; min-height: 1.2em; }
+
+  .viz-root {
+    color-scheme: light;
+    --surface-1:      #fcfcfb;
+    --page:           #f9f9f7;
+    --text-primary:   #0b0b0b;
+    --text-secondary: #52514e;
+    --text-muted:     #898781;
+    --gridline:       #e1e0d9;
+    --baseline:       #c3c2b7;
+    --series-1:       #2a78d6;
+    background: var(--page);
+    color: var(--text-primary);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) .viz-root {
+      color-scheme: dark;
+      --surface-1:      #1a1a19;
+      --page:           #0d0d0d;
+      --text-primary:   #ffffff;
+      --text-secondary: #c3c2b7;
+      --text-muted:     #898781;
+      --gridline:       #2c2c2a;
+      --baseline:       #383835;
+      --series-1:       #3987e5;
+    }
+  }
+  :root[data-theme="dark"] .viz-root {
+    color-scheme: dark;
+    --surface-1:      #1a1a19;
+    --page:           #0d0d0d;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --gridline:       #2c2c2a;
+    --baseline:       #383835;
+    --series-1:       #3987e5;
+  }
+
+  .chart-card { background: var(--surface-1); border-radius: 8px; padding: 1.25rem; }
+  .chart-title { font-size: 0.95rem; font-weight: 600; margin: 0 0 0.9rem; }
+  .tick-label { fill: var(--text-muted); font-size: 11px; }
+  .end-label { fill: var(--text-secondary); font-size: 12px; font-weight: 600; }
+  .gridline { stroke: var(--gridline); stroke-width: 1; }
+  .baseline { stroke: var(--baseline); stroke-width: 1; }
+  .trend-line { fill: none; stroke: var(--series-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .trend-dot { fill: var(--series-1); stroke: var(--surface-1); stroke-width: 2; }
+  .hit-target { fill: transparent; cursor: pointer; }
+
+  .tooltip {
+    position: absolute; pointer-events: none; background: var(--text-primary); color: var(--surface-1);
+    font-size: 12px; padding: 4px 8px; border-radius: 4px; transform: translate(-50%, -130%);
+    white-space: nowrap; opacity: 0; transition: opacity 0.1s;
+  }
+  .chart-wrap { position: relative; }
+
+  table { border-collapse: collapse; margin-top: 1.5rem; font-size: 0.85rem; width: 100%; }
+  caption { text-align: left; color: var(--text-secondary); margin-bottom: 0.4rem; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid var(--gridline); font-variant-numeric: tabular-nums; }
+  th { color: var(--text-muted); font-weight: 600; }
+</style>
+</head>
+<body>
+<nav><a href="/review.html">Review</a><a href="/trend.html">Trend</a></nav>
+<h1>Edit-distance trend</h1>
+<p>Word-level edit distance between each generated draft and the human editor's revision — should trend down as edit memory (phase 4) accumulates.</p>
+
+<div class="row">
+  <input name="owner" value="colinhacks" placeholder="owner" />
+  <input name="repo" value="zod" placeholder="repo" />
+  <button id="loadBtn">Load trend</button>
+</div>
+<p class="status" id="status"></p>
+
+<div class="viz-root" id="vizRoot" hidden>
+  <div class="chart-card">
+    <p class="chart-title" id="chartTitle">Edit distance per round</p>
+    <div class="chart-wrap">
+      <svg id="chart" width="100%" viewBox="0 0 640 280" role="img" aria-labelledby="chartTitle"></svg>
+      <div class="tooltip" id="tooltip"></div>
+    </div>
+  </div>
+
+  <table id="dataTable">
+    <caption>Round-by-round edit distance (data behind the chart above)</caption>
+    <thead><tr><th>Round</th><th>Edit distance (words)</th><th>Logged at</th></tr></thead>
+    <tbody id="dataTableBody"></tbody>
+  </table>
+</div>
+
+<script>
+  const ownerInput = document.querySelector('input[name="owner"]');
+  const repoInput = document.querySelector('input[name="repo"]');
+  const loadBtn = document.getElementById('loadBtn');
+  const statusEl = document.getElementById('status');
+  const vizRoot = document.getElementById('vizRoot');
+  const chartTitle = document.getElementById('chartTitle');
+  const svg = document.getElementById('chart');
+  const tooltip = document.getElementById('tooltip');
+  const tbody = document.getElementById('dataTableBody');
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs) => {
+    const node = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    return node;
+  };
+
+  function render(owner, repo, rounds) {
+    chartTitle.textContent = `Edit distance per round — ${owner}/${repo}`;
+    svg.innerHTML = '';
+    tbody.innerHTML = '';
+
+    const W = 640, H = 280;
+    const padL = 40, padR = 24, padT = 16, padB = 32;
+    const plotW = W - padL - padR;
+    const plotH = H - padT - padB;
+
+    const maxY = Math.max(1, ...rounds.map((r) => r.editDistance));
+    const yTicks = 4;
+    const x = (i) => padL + (rounds.length === 1 ? plotW / 2 : (i / (rounds.length - 1)) * plotW);
+    const y = (v) => padT + plotH - (v / maxY) * plotH;
+
+    // gridlines + y-axis ticks
+    for (let t = 0; t <= yTicks; t++) {
+      const v = Math.round((maxY / yTicks) * t);
+      const gy = y(v);
+      svg.appendChild(el('line', { x1: padL, x2: W - padR, y1: gy, y2: gy, class: t === 0 ? 'baseline' : 'gridline' }));
+      const label = el('text', { x: padL - 8, y: gy + 3, class: 'tick-label', 'text-anchor': 'end' });
+      label.textContent = v;
+      svg.appendChild(label);
+    }
+
+    // x-axis round labels
+    rounds.forEach((r, i) => {
+      const label = el('text', { x: x(i), y: H - padB + 18, class: 'tick-label', 'text-anchor': 'middle' });
+      label.textContent = `R${r.round}`;
+      svg.appendChild(label);
+    });
+
+    // line
+    const points = rounds.map((r, i) => `${x(i)},${y(r.editDistance)}`).join(' ');
+    svg.appendChild(el('polyline', { points, class: 'trend-line' }));
+
+    // dots + hit targets + tooltip
+    rounds.forEach((r, i) => {
+      svg.appendChild(el('circle', { cx: x(i), cy: y(r.editDistance), r: 5, class: 'trend-dot' }));
+
+      const hit = el('circle', { cx: x(i), cy: y(r.editDistance), r: 14, class: 'hit-target' });
+      hit.addEventListener('mouseenter', (e) => {
+        const rect = svg.getBoundingClientRect();
+        tooltip.style.left = `${(x(i) / W) * rect.width}px`;
+        tooltip.style.top = `${(y(r.editDistance) / H) * rect.height}px`;
+        tooltip.textContent = `Round ${r.round}: ${r.editDistance} words changed`;
+        tooltip.style.opacity = '1';
+      });
+      hit.addEventListener('mouseleave', () => { tooltip.style.opacity = '0'; });
+      svg.appendChild(hit);
+    });
+
+    // end label — value at the last point
+    const last = rounds[rounds.length - 1];
+    const endLabel = el('text', {
+      x: x(rounds.length - 1) + 8,
+      y: y(last.editDistance) - 8,
+      class: 'end-label',
+    });
+    endLabel.textContent = `${last.editDistance}`;
+    svg.appendChild(endLabel);
+
+    for (const r of rounds) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r.round}</td><td>${r.editDistance}</td><td>${new Date(r.createdAt).toLocaleString()}</td>`;
+      tbody.appendChild(tr);
+    }
+  }
+
+  loadBtn.addEventListener('click', async () => {
+    const owner = ownerInput.value.trim();
+    const repo = repoInput.value.trim();
+    if (!owner || !repo) return;
+
+    statusEl.textContent = 'Loading...';
+    vizRoot.hidden = true;
+
+    try {
+      const res = await fetch(`/api/trend/${owner}/${repo}`);
+      const rounds = await res.json();
+      if (!res.ok) throw new Error(rounds.error || 'Request failed');
+
+      if (rounds.length === 0) {
+        statusEl.textContent = `No rounds logged yet for ${owner}/${repo}. Go to Review, fetch a draft, edit it, and save — repeat a few times.`;
+        return;
+      }
+
+      statusEl.textContent = `${rounds.length} round(s) logged.`;
+      vizRoot.hidden = false;
+      render(owner, repo, rounds);
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+    }
+  });
+</script>
+</body>
+</html>

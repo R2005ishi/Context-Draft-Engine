@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Context Draft Engine — Review</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; color: #1a1a1a; }
+  h1 { font-size: 1.25rem; }
+  .row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
+  input { padding: 0.4rem; font-family: monospace; }
+  input[name="owner"], input[name="repo"] { width: 140px; }
+  button { padding: 0.4rem 0.9rem; cursor: pointer; }
+  textarea { width: 100%; min-height: 320px; font-family: monospace; font-size: 0.9rem; box-sizing: border-box; padding: 0.6rem; }
+  .status { color: #666; font-size: 0.9rem; margin: 0.5rem 0; min-height: 1.2em; }
+  .meta { color: #666; font-size: 0.85rem; }
+  nav a { margin-right: 1rem; }
+</style>
+</head>
+<body>
+<nav><a href="/review.html">Review</a><a href="/trend.html">Trend</a></nav>
+<h1>Draft review</h1>
+<div class="row">
+  <input name="owner" value="colinhacks" placeholder="owner" />
+  <input name="repo" value="zod" placeholder="repo" />
+  <button id="fetchBtn">Fetch draft</button>
+</div>
+<p class="status" id="status"></p>
+<p class="meta" id="meta"></p>
+<textarea id="editor" placeholder="Draft will appear here..."></textarea>
+<div class="row">
+  <button id="saveBtn" disabled>Save edit &amp; log round</button>
+</div>
+
+<script>
+  const ownerInput = document.querySelector('input[name="owner"]');
+  const repoInput = document.querySelector('input[name="repo"]');
+  const fetchBtn = document.getElementById('fetchBtn');
+  const saveBtn = document.getElementById('saveBtn');
+  const editor = document.getElementById('editor');
+  const statusEl = document.getElementById('status');
+  const metaEl = document.getElementById('meta');
+
+  let originalDraft = null;
+  let currentRound = null;
+
+  fetchBtn.addEventListener('click', async () => {
+    const owner = ownerInput.value.trim();
+    const repo = repoInput.value.trim();
+    if (!owner || !repo) return;
+
+    statusEl.textContent = 'Fetching context and generating draft...';
+    saveBtn.disabled = true;
+    editor.value = '';
+
+    try {
+      const res = await fetch(`/api/draft/${owner}/${repo}?limit=10`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+
+      originalDraft = data.draft;
+      currentRound = data.round;
+      editor.value = data.draft;
+      statusEl.textContent = `Draft ready — this will be round ${currentRound} for ${owner}/${repo}.`;
+      metaEl.textContent = `Context fetched at ${data.context.fetchedAt} (${data.context.commits.length} commits, ${data.context.pullRequests.length} PRs, ${data.context.issues.length} issues)`;
+      saveBtn.disabled = false;
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+    }
+  });
+
+  saveBtn.addEventListener('click', async () => {
+    const owner = ownerInput.value.trim();
+    const repo = repoInput.value.trim();
+    if (originalDraft === null) return;
+
+    statusEl.textContent = 'Saving edit...';
+    saveBtn.disabled = true;
+
+    try {
+      const res = await fetch(`/api/edits/${owner}/${repo}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ draft: originalDraft, editedDraft: editor.value }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Request failed');
+
+      statusEl.textContent = `Round ${data.round} logged — edit distance ${data.editDistance} words. Fetch again to generate round ${data.round + 1}.`;
+    } catch (err) {
+      statusEl.textContent = `Error: ${err.message}`;
+      saveBtn.disabled = false;
+    }
+  });
+</script>
+</body>
+</html>
